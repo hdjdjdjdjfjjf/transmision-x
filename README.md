@@ -1,17 +1,14 @@
-# Tarot
+# Transmisión X
 
-Aplicación web de tarot con los 22 Arcanos Mayores.
+Primera versión de la plataforma de videos cortos Transmisión X.
 
-## Funciones
-- Tirada de Pasado, Presente y Dirección.
-- Cartas aleatorias sin repetir.
-- Cartas invertidas.
-- Pregunta opcional.
-- Animación de revelado.
-- Interpretaciones simbólicas.
-- Diseño responsive y sin dependencias externas.
+## Incluye
+- Feed vertical con scroll tipo Shorts.
+- Navegación Para ti / Siguiendo.
+- Acciones de Me gusta, comentarios y compartir.
+- Barra móvil de Inicio, Buscar, Crear, Actividad y Perfil.
+- Identidad visual propia de Transmisión X.
+- Base preparada para conectar autenticación, subida de videos, perfiles, comentarios y backend.
 
-## Uso
-Abre `index.html` en un navegador o publícalo con GitHub Pages.
-
-El tarot se presenta como entretenimiento y reflexión personal; no constituye una predicción garantizada ni asesoramiento profesional.
+## Siguiente etapa
+La interfaz actual es un prototipo frontend. Para convertirla en una plataforma completa habrá que conectar usuarios, base de datos, almacenamiento de videos, procesamiento/transcodificación, CDN y moderación.
