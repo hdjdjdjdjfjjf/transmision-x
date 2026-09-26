@@ -1,50 +1,147 @@
 import 'dotenv/config';
 import express from 'express';
 import cookieParser from 'cookie-parser';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import Database from 'better-sqlite3';
+import { createClient } from '@supabase/supabase-js';
 import multer from 'multer';
-import fs from 'fs';
 import path from 'path';
-import {fileURLToPath} from 'url';
+import { fileURLToPath } from 'url';
 
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
-const app=express(), PORT=process.env.PORT||3000, SECRET=process.env.JWT_SECRET||'dev-secret-change-me';
-const dataDir=path.join(__dirname,'data'), uploadDir=path.join(__dirname,'uploads');
-fs.mkdirSync(dataDir,{recursive:true}); fs.mkdirSync(uploadDir,{recursive:true});
-const db=new Database(path.join(dataDir,'transmisionx.db'));
-db.pragma('journal_mode=WAL'); db.pragma('foreign_keys=ON');
-db.exec(`
-CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT UNIQUE NOT NULL,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,bio TEXT DEFAULT '',avatar TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS videos(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,filename TEXT NOT NULL,caption TEXT DEFAULT '',views INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS likes(user_id INTEGER NOT NULL,video_id INTEGER NOT NULL,PRIMARY KEY(user_id,video_id),FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS comments(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,video_id INTEGER NOT NULL,text TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS follows(follower_id INTEGER NOT NULL,following_id INTEGER NOT NULL,PRIMARY KEY(follower_id,following_id),CHECK(follower_id<>following_id),FOREIGN KEY(follower_id) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(following_id) REFERENCES users(id) ON DELETE CASCADE);
-`);
-app.use(express.json({limit:'1mb'})); app.use(cookieParser()); app.use(express.static(path.join(__dirname,'public'))); app.use('/uploads',express.static(uploadDir));
+const app=express();
+const PORT=process.env.PORT||3000;
+const SUPABASE_URL=process.env.SUPABASE_URL||'https://ebcerirjvbxuykfgczey.supabase.co';
+const SUPABASE_KEY=process.env.SUPABASE_PUBLISHABLE_KEY||process.env.SUPABASE_ANON_KEY;
 
-function token(user){return jwt.sign({id:user.id,username:user.username},SECRET,{expiresIn:'7d'})}
-function auth(req,res,next){try{const t=req.cookies.tx_token; if(!t) return res.status(401).json({error:'Inicia sesión'}); req.user=jwt.verify(t,SECRET); next()}catch{return res.status(401).json({error:'Sesión inválida'})}}
-function safeUser(id){return db.prepare('SELECT id,username,email,bio,avatar,created_at FROM users WHERE id=?').get(id)}
+if(!SUPABASE_KEY) console.warn('Missing SUPABASE_PUBLISHABLE_KEY/SUPABASE_ANON_KEY');
 
-app.post('/api/auth/register',async(req,res)=>{const {username,email,password}=req.body; if(!/^\w{3,20}$/.test(username||''))return res.status(400).json({error:'Usuario: 3-20 caracteres, letras/números/_'}); if(!/^\S+@\S+\.\S+$/.test(email||''))return res.status(400).json({error:'Correo inválido'}); if((password||'').length<6)return res.status(400).json({error:'Contraseña mínima de 6 caracteres'}); try{const hash=await bcrypt.hash(password,12);const r=db.prepare('INSERT INTO users(username,email,password_hash) VALUES(?,?,?)').run(username.toLowerCase(),email.toLowerCase(),hash);const u=safeUser(r.lastInsertRowid);res.cookie('tx_token',token(u),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:604800000});res.json({user:u})}catch(e){res.status(409).json({error:'Usuario o correo ya registrado'})}});
-app.post('/api/auth/login',async(req,res)=>{const {email,password}=req.body||{};const u=db.prepare('SELECT * FROM users WHERE email=?').get((email||'').toLowerCase());if(!u||!(await bcrypt.compare(password||'',u.password_hash)))return res.status(401).json({error:'Correo o contraseña incorrectos'});res.cookie('tx_token',token(u),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:604800000});res.json({user:safeUser(u.id)})});
-app.post('/api/auth/logout',(req,res)=>{res.clearCookie('tx_token');res.json({ok:true})});
-app.get('/api/me',(req,res)=>{try{const t=req.cookies.tx_token;if(!t)return res.status(401).json({error:'no-session'});const p=jwt.verify(t,SECRET);res.json({user:safeUser(p.id)})}catch{res.status(401).json({error:'no-session'})}});
+const supabase=createClient(SUPABASE_URL,SUPABASE_KEY);
+app.use(express.json({limit:'1mb'}));
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname,'public')));
 
-const storage=multer.diskStorage({destination:uploadDir,filename:(req,file,cb)=>{const ext=path.extname(file.originalname).toLowerCase();cb(null,Date.now()+'-'+Math.random().toString(36).slice(2)+ext)}});
-const upload=multer({storage,limits:{fileSize:(Number(process.env.MAX_VIDEO_MB)||100)*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^video\/(mp4|webm|quicktime|x-matroska)$/.test(file.mimetype))});
-app.post('/api/videos',auth,upload.single('video'),(req,res)=>{if(!req.file)return res.status(400).json({error:'Selecciona un video MP4, WebM o MOV'});const r=db.prepare('INSERT INTO videos(user_id,filename,caption) VALUES(?,?,?)').run(req.user.id,req.file.filename,(req.body.caption||'').slice(0,300));res.status(201).json(video(r.lastInsertRowid,req.user.id))});
+function clientFor(req){
+  const token=req.cookies.tx_access;
+  return token ? createClient(SUPABASE_URL,SUPABASE_KEY,{global:{headers:{Authorization:'Bearer '+token}}}) : supabase;
+}
+async function auth(req,res,next){
+  const c=clientFor(req);
+  const {data:{user},error}=await c.auth.getUser();
+  if(error||!user)return res.status(401).json({error:'Inicia sesión'});
+  req.sb=c; req.user=user; next();
+}
+function cookieOpts(maxAge){return {httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge,path:'/'}}
 
-function video(id,viewerId=0){const v=db.prepare(`SELECT v.*,u.username,u.avatar,(SELECT COUNT(*) FROM likes l WHERE l.video_id=v.id) likes,(SELECT COUNT(*) FROM comments c WHERE c.video_id=v.id) comments,(SELECT COUNT(*) FROM likes l WHERE l.video_id=v.id AND l.user_id=?) liked FROM videos v JOIN users u ON u.id=v.user_id WHERE v.id=?`).get(viewerId,id);if(v)v.videoUrl='/uploads/'+v.filename;delete v.filename;return v}
-app.get('/api/videos',(req,res)=>{let viewer=0;try{if(req.cookies.tx_token)viewer=jwt.verify(req.cookies.tx_token,SECRET).id}catch{} const rows=db.prepare('SELECT id FROM videos ORDER BY id DESC LIMIT 100').all();res.json(rows.map(x=>video(x.id,viewer)))});
-app.post('/api/videos/:id/view',(req,res)=>{db.prepare('UPDATE videos SET views=views+1 WHERE id=?').run(req.params.id);res.json({ok:true})});
-app.post('/api/videos/:id/like',auth,(req,res)=>{const id=Number(req.params.id);const exists=db.prepare('SELECT 1 FROM likes WHERE user_id=? AND video_id=?').get(req.user.id,id);if(exists)db.prepare('DELETE FROM likes WHERE user_id=? AND video_id=?').run(req.user.id,id);else db.prepare('INSERT INTO likes(user_id,video_id) VALUES(?,?)').run(req.user.id,id);res.json(video(id,req.user.id))});
-app.get('/api/videos/:id/comments',(req,res)=>res.json(db.prepare('SELECT c.id,c.text,c.created_at,u.username,u.avatar FROM comments c JOIN users u ON u.id=c.user_id WHERE c.video_id=? ORDER BY c.id DESC').all(req.params.id)));
-app.post('/api/videos/:id/comments',auth,(req,res)=>{const text=(req.body.text||'').trim();if(!text||text.length>500)return res.status(400).json({error:'Comentario inválido'});const r=db.prepare('INSERT INTO comments(user_id,video_id,text) VALUES(?,?,?)').run(req.user.id,req.params.id,text);res.status(201).json(db.prepare('SELECT c.id,c.text,c.created_at,u.username,u.avatar FROM comments c JOIN users u ON u.id=c.user_id WHERE c.id=?').get(r.lastInsertRowid))});
-app.get('/api/users/:username',(req,res)=>{const u=db.prepare('SELECT id,username,bio,avatar,created_at FROM users WHERE username=?').get(req.params.username.toLowerCase());if(!u)return res.status(404).json({error:'No encontrado'});u.followers=db.prepare('SELECT COUNT(*) n FROM follows WHERE following_id=?').get(u.id).n;u.following=db.prepare('SELECT COUNT(*) n FROM follows WHERE follower_id=?').get(u.id).n;u.videos=db.prepare('SELECT COUNT(*) n FROM videos WHERE user_id=?').get(u.id).n;res.json(u)});
-app.post('/api/users/:id/follow',auth,(req,res)=>{const id=Number(req.params.id);if(id===req.user.id)return res.status(400).json({error:'No puedes seguirte'});const e=db.prepare('SELECT 1 FROM follows WHERE follower_id=? AND following_id=?').get(req.user.id,id);if(e)db.prepare('DELETE FROM follows WHERE follower_id=? AND following_id=?').run(req.user.id,id);else db.prepare('INSERT INTO follows VALUES(?,?)').run(req.user.id,id);res.json({following:!e})});
+app.post('/api/auth/register',async(req,res)=>{
+  const username=(req.body.username||'').trim().replace(/^@/,'').toLowerCase();
+  const email=(req.body.email||'').trim().toLowerCase();
+  const password=req.body.password||'';
+  if(!/^\\w{3,20}$/.test(username))return res.status(400).json({error:'Usuario: 3-20 caracteres, letras/números/_'});
+  if(!/^\\S+@\\S+\\.\\S+$/.test(email))return res.status(400).json({error:'Correo inválido'});
+  if(password.length<6)return res.status(400).json({error:'Contraseña mínima de 6 caracteres'});
+  const {data,error}=await supabase.auth.signUp({email,password,options:{data:{username}}});
+  if(error)return res.status(400).json({error:error.message});
+  if(!data.user)return res.status(400).json({error:'No se pudo crear la cuenta'});
+  if(data.session){
+    res.cookie('tx_access',data.session.access_token,cookieOpts(604800000));
+    res.cookie('tx_refresh',data.session.refresh_token,cookieOpts(2592000000));
+  }
+  const {data:profile}=await supabase.from('profiles').select('*').eq('id',data.user.id).maybeSingle();
+  res.json({user:profile||{id:data.user.id,username},requiresEmailConfirmation:!data.session});
+});
+
+app.post('/api/auth/login',async(req,res)=>{
+  const email=(req.body.email||'').trim().toLowerCase(),password=req.body.password||'';
+  const {data,error}=await supabase.auth.signInWithPassword({email,password});
+  if(error||!data.session)return res.status(401).json({error:'Correo o contraseña incorrectos'});
+  res.cookie('tx_access',data.session.access_token,cookieOpts(604800000));
+  res.cookie('tx_refresh',data.session.refresh_token,cookieOpts(2592000000));
+  const {data:profile}=await supabase.from('profiles').select('*').eq('id',data.user.id).single();
+  res.json({user:profile});
+});
+
+app.post('/api/auth/logout',async(req,res)=>{
+  try{await clientFor(req).auth.signOut()}catch{}
+  res.clearCookie('tx_access',{path:'/'});res.clearCookie('tx_refresh',{path:'/'});
+  res.json({ok:true});
+});
+
+app.get('/api/me',async(req,res)=>{
+  const c=clientFor(req); const {data:{user}}=await c.auth.getUser();
+  if(!user)return res.status(401).json({error:'no-session'});
+  const {data:profile}=await c.from('profiles').select('*').eq('id',user.id).single();
+  res.json({user:profile});
+});
+
+const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:(Number(process.env.MAX_VIDEO_MB)||100)*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^video\\/(mp4|webm|quicktime)$/.test(file.mimetype))});
+
+async function formatVideos(rows,viewerId){
+  const ids=rows.map(v=>v.id);
+  let liked=new Set();
+  if(viewerId&&ids.length){const {data}=await supabase.from('likes').select('video_id').eq('user_id',viewerId).in('video_id',ids);liked=new Set((data||[]).map(x=>x.video_id))}
+  return rows.map(v=>({...v,username:v.profiles?.username,avatar:v.profiles?.avatar_url,videoUrl:supabase.storage.from('videos').getPublicUrl(v.storage_path).data.publicUrl,liked:liked.has(v.id)}));
+}
+
+app.get('/api/videos',async(req,res)=>{
+  const c=clientFor(req);const {data:{user}}=await c.auth.getUser();
+  const {data,error}=await supabase.from('videos').select('id,user_id,storage_path,caption,views,created_at,profiles(username,avatar_url),likes(count),comments(count)').order('created_at',{ascending:false}).limit(100);
+  if(error)return res.status(500).json({error:error.message});
+  res.json(await formatVideos(data||[],user?.id));
+});
+
+app.post('/api/videos',auth,upload.single('video'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'Selecciona un video MP4, WebM o MOV'});
+  const ext=path.extname(req.file.originalname).toLowerCase()||'.mp4';
+  const storagePath=req.user.id+'/'+Date.now()+'-'+Math.random().toString(36).slice(2)+ext;
+  const {error:upError}=await req.sb.storage.from('videos').upload(storagePath,req.file.buffer,{contentType:req.file.mimetype,upsert:false});
+  if(upError)return res.status(400).json({error:upError.message});
+  const {data,error}=await req.sb.from('videos').insert({user_id:req.user.id,storage_path:storagePath,caption:(req.body.caption||'').slice(0,300)}).select('id,user_id,storage_path,caption,views,created_at,profiles(username,avatar_url)').single();
+  if(error){await req.sb.storage.from('videos').remove([storagePath]);return res.status(400).json({error:error.message})}
+  res.status(201).json((await formatVideos([data],req.user.id))[0]);
+});
+
+app.post('/api/videos/:id/view',async(req,res)=>{
+  const {error}=await supabase.rpc('increment_video_views',{video_id:BigInt(req.params.id).toString()});
+  if(error)return res.status(400).json({error:error.message});res.json({ok:true});
+});
+
+app.post('/api/videos/:id/like',auth,async(req,res)=>{
+  const id=Number(req.params.id);
+  const {data:existing}=await req.sb.from('likes').select('video_id').eq('user_id',req.user.id).eq('video_id',id).maybeSingle();
+  if(existing)await req.sb.from('likes').delete().eq('user_id',req.user.id).eq('video_id',id);
+  else {const {error}=await req.sb.from('likes').insert({user_id:req.user.id,video_id:id});if(error)return res.status(400).json({error:error.message})}
+  const {data:v}=await supabase.from('videos').select('id,user_id,storage_path,caption,views,created_at,profiles(username,avatar_url),likes(count),comments(count)').eq('id',id).single();
+  res.json((await formatVideos([v],req.user.id))[0]);
+});
+
+app.get('/api/videos/:id/comments',async(req,res)=>{
+  const {data,error}=await supabase.from('comments').select('id,text,created_at,profiles(username,avatar_url)').eq('video_id',Number(req.params.id)).order('created_at',{ascending:false});
+  if(error)return res.status(400).json({error:error.message});
+  res.json((data||[]).map(c=>({...c,username:c.profiles?.username,avatar:c.profiles?.avatar_url})));
+});
+app.post('/api/videos/:id/comments',auth,async(req,res)=>{
+  const text=(req.body.text||'').trim();if(!text||text.length>500)return res.status(400).json({error:'Comentario inválido'});
+  const {data,error}=await req.sb.from('comments').insert({user_id:req.user.id,video_id:Number(req.params.id),text}).select('id,text,created_at,profiles(username,avatar_url)').single();
+  if(error)return res.status(400).json({error:error.message});
+  res.status(201).json({...data,username:data.profiles?.username,avatar:data.profiles?.avatar_url});
+});
+
+app.get('/api/users/:username',async(req,res)=>{
+  const {data:u}=await supabase.from('profiles').select('*').eq('username',req.params.username.toLowerCase()).maybeSingle();
+  if(!u)return res.status(404).json({error:'No encontrado'});
+  const [followers,following,videos]=await Promise.all([
+    supabase.from('follows').select('*',{count:'exact',head:true}).eq('following_id',u.id),
+    supabase.from('follows').select('*',{count:'exact',head:true}).eq('follower_id',u.id),
+    supabase.from('videos').select('*',{count:'exact',head:true}).eq('user_id',u.id)
+  ]);
+  res.json({...u,followers:followers.count||0,following:following.count||0,videos:videos.count||0});
+});
+app.post('/api/users/:id/follow',auth,async(req,res)=>{
+  const id=req.params.id;if(id===req.user.id)return res.status(400).json({error:'No puedes seguirte'});
+  const {data:e}=await req.sb.from('follows').select('*').eq('follower_id',req.user.id).eq('following_id',id).maybeSingle();
+  if(e)await req.sb.from('follows').delete().eq('follower_id',req.user.id).eq('following_id',id);
+  else {const {error}=await req.sb.from('follows').insert({follower_id:req.user.id,following_id:id});if(error)return res.status(400).json({error:error.message})}
+  res.json({following:!e});
+});
 
 app.get('/{*splat}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Error interno'})});
