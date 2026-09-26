@@ -83,7 +83,19 @@ async function formatVideos(rows,viewerId){
 
 app.get('/api/videos',async(req,res)=>{
   const c=clientFor(req);const {data:{user}}=await c.auth.getUser();
-  const {data,error}=await supabase.from('videos').select('id,user_id,storage_path,caption,views,created_at,profiles(username,avatar_url),likes(count),comments(count)').order('created_at',{ascending:false}).limit(100);
+  let q=supabase.from('videos').select('id,user_id,storage_path,caption,views,created_at,profiles(username,avatar_url),likes(count),comments(count)').order('created_at',{ascending:false}).limit(100);
+  const mode=req.query.mode||'forYou';
+  const search=String(req.query.q||'').trim();
+  if(search) q=q.ilike('caption','%'+search.replace(/[%_]/g,'')+'%');
+  if(mode==='following'){
+    if(!user)return res.status(401).json({error:'Inicia sesión'});
+    const {data:followRows,error:followError}=await supabase.from('follows').select('following_id').eq('follower_id',user.id);
+    if(followError)return res.status(500).json({error:followError.message});
+    const ids=(followRows||[]).map(x=>x.following_id);
+    if(!ids.length)return res.json([]);
+    q=q.in('user_id',ids);
+  }
+  const {data,error}=await q;
   if(error)return res.status(500).json({error:error.message});
   res.json(await formatVideos(data||[],user?.id));
 });
