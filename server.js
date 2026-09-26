@@ -14,20 +14,40 @@ const SUPABASE_KEY=process.env.SUPABASE_PUBLISHABLE_KEY||process.env.SUPABASE_AN
 
 if(!SUPABASE_KEY) console.warn('Missing SUPABASE_PUBLISHABLE_KEY/SUPABASE_ANON_KEY');
 
-const supabase=createClient(SUPABASE_URL,SUPABASE_KEY);
+const supabase=createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{autoRefreshToken:false,persistSession:false,detectSessionInUrl:false}});
+function makeAuthClient(){return createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{autoRefreshToken:false,persistSession:false,detectSessionInUrl:false}})}
 app.use(express.json({limit:'1mb'}));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname,'public')));
 
 function clientFor(req){
   const token=req.cookies.tx_access;
-  return token ? createClient(SUPABASE_URL,SUPABASE_KEY,{global:{headers:{Authorization:'Bearer '+token}}}) : supabase;
+  return token ? createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{autoRefreshToken:false,persistSession:false,detectSessionInUrl:false},global:{headers:{Authorization:'Bearer '+token}}}) : supabase;
+}
+async function resolveAuth(req,res){
+  const accessToken=req.cookies.tx_access;
+  const refreshToken=req.cookies.tx_refresh;
+  if(!accessToken||!refreshToken)return null;
+  const authClient=makeAuthClient();
+  const {data,error}=await authClient.auth.setSession({access_token:accessToken,refresh_token:refreshToken});
+  if(error||!data.session||!data.user)return null;
+  const session=data.session;
+  if(session.access_token!==accessToken){
+    res.cookie('tx_access',session.access_token,cookieOpts(604800000));
+    res.cookie('tx_refresh',session.refresh_token,cookieOpts(2592000000));
+  }
+  const client=createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{autoRefreshToken:false,persistSession:false,detectSessionInUrl:false},global:{headers:{Authorization:'Bearer '+session.access_token}}});
+  return {authClient,client,user:data.user,session};
 }
 async function auth(req,res,next){
-  const c=clientFor(req);
-  const {data:{user},error}=await c.auth.getUser();
-  if(error||!user)return res.status(401).json({error:'Inicia sesión'});
-  req.sb=c; req.user=user; next();
+  const state=await resolveAuth(req,res);
+  if(!state)return res.status(401).json({error:'Inicia sesión'});
+  req.sb=state.client; req.user=state.user; next();
+}
+async function requirePageAuth(req,res,next){
+  const state=await resolveAuth(req,res);
+  if(!state)return res.redirect('/login?next='+encodeURIComponent(req.originalUrl));
+  req.sb=state.client; req.user=state.user; next();
 }
 function cookieOpts(maxAge){return {httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge,path:'/'}}
 
@@ -60,17 +80,23 @@ app.post('/api/auth/login',async(req,res)=>{
 });
 
 app.post('/api/auth/logout',async(req,res)=>{
-  try{await clientFor(req).auth.signOut()}catch{}
+  try{
+    const state=await resolveAuth(req,res);
+    if(state)await state.authClient.auth.signOut({scope:'local'});
+  }catch{}
   res.clearCookie('tx_access',{path:'/'});res.clearCookie('tx_refresh',{path:'/'});
   res.json({ok:true});
 });
 
 app.get('/api/me',async(req,res)=>{
-  const c=clientFor(req); const {data:{user}}=await c.auth.getUser();
-  if(!user)return res.status(401).json({error:'no-session'});
-  const {data:profile}=await c.from('profiles').select('*').eq('id',user.id).single();
+  const state=await resolveAuth(req,res);
+  if(!state)return res.status(401).json({error:'no-session'});
+  const {data:profile}=await state.client.from('profiles').select('*').eq('id',state.user.id).single();
   res.json({user:profile});
 });
+
+app.get('/login',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
+app.get(['/app','/upload','/activity'],requirePageAuth,(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:(Number(process.env.MAX_VIDEO_MB)||100)*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^video\\/(mp4|webm|quicktime)$/.test(file.mimetype))});
 
