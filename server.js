@@ -145,4 +145,5 @@ app.post('/api/users/:id/follow',auth,async(req,res)=>{
 
 app.get('/{*splat}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Error interno'})});
-app.listen(PORT,()=>console.log('Transmisión X en http://localhost:'+PORT));
+export default app;
+if (process.env.VERCEL !== '1') app.listen(PORT,()=>console.log('Transmisión X en http://localhost:'+PORT));
