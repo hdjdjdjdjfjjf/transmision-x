@@ -46,6 +46,6 @@ app.post('/api/videos/:id/comments',auth,(req,res)=>{const text=(req.body.text||
 app.get('/api/users/:username',(req,res)=>{const u=db.prepare('SELECT id,username,bio,avatar,created_at FROM users WHERE username=?').get(req.params.username.toLowerCase());if(!u)return res.status(404).json({error:'No encontrado'});u.followers=db.prepare('SELECT COUNT(*) n FROM follows WHERE following_id=?').get(u.id).n;u.following=db.prepare('SELECT COUNT(*) n FROM follows WHERE follower_id=?').get(u.id).n;u.videos=db.prepare('SELECT COUNT(*) n FROM videos WHERE user_id=?').get(u.id).n;res.json(u)});
 app.post('/api/users/:id/follow',auth,(req,res)=>{const id=Number(req.params.id);if(id===req.user.id)return res.status(400).json({error:'No puedes seguirte'});const e=db.prepare('SELECT 1 FROM follows WHERE follower_id=? AND following_id=?').get(req.user.id,id);if(e)db.prepare('DELETE FROM follows WHERE follower_id=? AND following_id=?').run(req.user.id,id);else db.prepare('INSERT INTO follows VALUES(?,?)').run(req.user.id,id);res.json({following:!e})});
 
-app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
+app.get('/{*splat}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Error interno'})});
 app.listen(PORT,()=>console.log('Transmisión X en http://localhost:'+PORT));
